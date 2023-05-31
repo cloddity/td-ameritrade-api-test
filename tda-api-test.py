@@ -15,27 +15,31 @@ discord_token = ''
 discord_token_2 = ''
 refresh_token = ''
 stock_list = []
+access_token = ''
 
+start = time.time()
 def authenticate():
-    # define the endpoint
-    url = r"https://api.tdameritrade.com/v1/oauth2/token"
+    if (((time.time() - start) % 1800) < delay + 10 or access_token == ''):
+        print("token generated!")
+        # define the endpoint
+        url = r"https://api.tdameritrade.com/v1/oauth2/token"
 
-    # define authentication headers
-    headers = {"Content-Type":"application/x-www-form-urlencoded"}
+        # define authentication headers
+        headers = {"Content-Type":"application/x-www-form-urlencoded"}
 
-    # define the payload
-    auth_payload = {'grant_type': 'refresh_token', 
-               'refresh_token': refresh_token,
-               'client_id': client_id}
+        # define the payload
+        auth_payload = {'grant_type': 'refresh_token', 
+                   'refresh_token': refresh_token,
+                   'client_id': client_id}
 
-    # post the data to get the token
-    authReply = requests.post(r'https://api.tdameritrade.com/v1/oauth2/token', headers=headers, data=auth_payload)
+        # post the data to get the token
+        authReply = requests.post(r'https://api.tdameritrade.com/v1/oauth2/token', headers=headers, data=auth_payload)
 
-    # convert it to a dictionary
-    decoded_content = authReply.json()                       
+        # convert it to a dictionary
+        decoded_content = authReply.json()                       
 
-    # grab the access_token
-    access_token = decoded_content['access_token']
+        # grab the access_token
+        access_token = decoded_content['access_token']
 
     # define order headers
     header = {'Authorization':"Bearer {}".format(access_token),
@@ -70,25 +74,27 @@ def convert_to_stop(order, sl, price):
 
 # decode contents of message to modify order template
 def parse(message):
-    #msg = ['BTO', 'QQQ', '324P', '5/24', '@.60', 'Trimming', '(Tight', '(SL', '@.50)'] FORMAT
-    #msg = ['BTO', 'QQQ', '326P', '5/24', '@1.26'] FORMAT
+    #msg = ['BTO', 'QQQ', '324P', '5/24', '@.60', 'Trimming', '(Tight', '(SL', '@.50)']
+    #msg = ['BTO', 'QQQ', '326P', '6/9', '@0.01']
     msg = message[1:]
     order_type = ""
     price = ""
-    if msg[0] == 'BTO':
-        order_type = "BUY_TO_OPEN"
-        price = (str(float(msg[4][1:]) + 0.02))
-    elif msg[0] == 'STC':
-        order_type = "SELL_TO_CLOSE"
-        price = (str(float(msg[4][1:]) - 0.05))
-    else:
-        return False
     stock = msg[1]
     d = msg[3].split('/')
     date = d[0].zfill(2) + d[1].zfill(2) + '23'
     option_type = msg[2][-1] + msg[2].rstrip(msg[2][-1])
     symbol = stock + "_" + date + option_type
-    #price = msg[4][1:]
+    if msg[0] == 'BTO':
+        order_type = "BUY_TO_OPEN"
+        price = (str(float(msg[4][1:]) + 0.03))
+        if (len(get_orders(symbol.split("_")[0])) > 0):
+            print("order already made!")
+            return False
+    elif msg[0] == 'STC':
+        order_type = "SELL_TO_CLOSE"
+        price = (str(float(msg[4][1:]) - 0.05))
+    else:
+        return False
 
     quantity = 3
 
@@ -150,9 +156,25 @@ def parse(message):
     print(main_order, full_order)
     return main_order, full_order
 
+def get_orders(symbol):
+    discard, header = authenticate()
+    endpoint = r"https://api.tdameritrade.com/v1/accounts/497742400?fields=positions".format(account_id)
+
+    response = requests.get(url = endpoint, headers = header)
+    content = json.loads(response.content.decode('ascii'))
+    positions = content["securitiesAccount"]["positions"]
+    orders = []
+    for i in range(len(positions)):
+        if positions[i]["instrument"]["assetType"] == "OPTION" and positions[i]["instrument"]["underlyingSymbol"] == symbol:
+            quantity = positions[i]["longQuantity"]
+            symbol = positions[i]["instrument"]["symbol"]
+            orders.append([symbol, quantity])
+    return orders
+
+
 def parse_2(message):
     msg = message
-    # msg = ["QQQ", "5/24", "337P", "at", "1.70"] FORMAT
+    # msg = ["QQQ", "5/24", "337P", "at", "1.70"]
     if msg[0].isupper() or msg[0][1:].isupper():
         order_type = "BUY_TO_OPEN"
         if "$" in msg[0]:
@@ -165,9 +187,9 @@ def parse_2(message):
         symbol = stock + "_" + date + option_type
         price = ""
         if "$" in msg[4]:
-            price = (str(float(msg[4][1:]) + 0.02))
+            price = (str(float(msg[4][1:]) + 0.03))
         else:
-            price = (str(float(msg[4]) + 0.02))
+            price = (str(float(msg[4]) + 0.03))
 
         full_order = {
           "complexOrderStrategyType": "NONE",
@@ -195,26 +217,27 @@ def parse_2(message):
         full_order["orderLegCollection"][0]["instruction"] = order_type
         full_order["orderLegCollection"][0]["quantity"] = quantity
         full_order["orderLegCollection"][0]["instrument"]["symbol"] = symbol
+
+        if (len(get_orders(symbol.split("_")[0])) > 0):
+            print("order already made! (2)")
+            return False
         
-        stock_list.append([stock, full_order])
         return full_order
-    else:
+    else: # selling
         for m in msg:
-            if "trim" in m or "out" in m:
+            if "rim" in m or "out" in m or "lose" in m:
                 for m2 in msg:
                     if m2.isupper():
-                        for i in range(len(stock_list)):
-                            if stock_list[i][0] == m2:
-                                # sell to close
-                                stock_list[i][1]["orderLegCollection"][0]["instruction"] = "SELL_TO_CLOSE"
-                                #stock_list[i][1]["orderType"]: "MARKET"
-                                #stock_list[i][1]["price"] = (str(float(price) - 0.07))
-                                stock_list[i][1]["price"] = "0.01"
-                                main_order = copy.deepcopy(stock_list[i][1])
-                                stock_list.pop(i)
-                                return main_order
+                        orders = get_orders(m2)
+                        full_order["orderLegCollection"][0]["instruction"] = "SELL_TO_CLOSE"
+                        full_order["orderType"] = "MARKET"
+                        del full_order["price"]
+                        print("found order!")
+                        for i in range(len(orders)):
+                             full_order["orderLegCollection"][0]["instrument"]["symbol"] = orders[i][0]
+                             full_order["orderLegCollection"][0]["quantity"] = orders[i][1]
+                             return full_order
         return False
-
     
 while(True):
     try:
@@ -235,16 +258,13 @@ while(True):
 
             if payload["orderLegCollection"][0]["instruction"] == "SELL_TO_CLOSE":
                 pass
-            elif stop_order is None:
+            else:
                 print("stop_order_manual")
                 stop = convert_to_stop(payload, 0.8, False)
-                time.sleep(1)
+                time.sleep(5)
                 content = requests.post(url = endpoint, json = stop, headers = header)
-            elif stop_order is not None:
-                print("stop_order_auto")
-                time.sleep(1)
-                content = requests.post(url = endpoint, json = stop_order, headers = header)
                 print(content.status_code)
+                
     except:
         print("Not valid.")
 
@@ -269,7 +289,7 @@ while(True):
             else:
                 print("stop_order_manual_2")
                 stop = convert_to_stop(payload_2, 0.8, False)
-                time.sleep(1)
+                time.sleep(5)
                 content = requests.post(url = endpoint, json = stop, headers = header)
     except:
         print("Not valid. (2)")
