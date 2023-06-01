@@ -1,21 +1,19 @@
 import requests
 import json
 import time
+from datetime import datetime
 import copy
 
 ## tokens ##
 delay = 60
 account_id = ''
 client_id = ''
-channel = ''
-channel_2 = ''
-discord_token = ''
-discord_token_2 = ''
+channel_list = ['', '']
+discord_token_list = ['', '']
+last_message_list = ['', '']
 refresh_token = ''
 access_token = input("Access Token: ")
 token_count = 0
-last_message = None
-last_message_2 = None
 
 def get_order_template():
     return {
@@ -105,23 +103,25 @@ def convert_to_stop(order, sl, price):
     json["duration"] = "GOOD_TILL_CANCEL"
     return json
 
-def get_orders(symbol):
+def check_auth():
     endpoint, header = get_position_headers()
     response = requests.get(url = endpoint, headers = header)
-    orders = []
-    
     if response.status_code == 401:
         authenticate()
-        return get_orders(symbol)
-    else:
-        content = json.loads(response.content.decode('ascii'))
-        positions = content["securitiesAccount"]["positions"]
-        
-        for i in range(len(positions)):
-            if positions[i]["instrument"]["assetType"] == "OPTION" and positions[i]["instrument"]["underlyingSymbol"] == symbol:
-                quantity = positions[i]["longQuantity"]
-                symbol = positions[i]["instrument"]["symbol"]
-                orders.append([symbol, quantity])
+        return check_auth()
+    return response
+
+def get_orders(symbol):
+    orders = []
+    response = check_auth()
+    content = json.loads(response.content.decode('ascii'))
+    positions = content["securitiesAccount"]["positions"]
+    
+    for i in range(len(positions)):
+        if positions[i]["instrument"]["assetType"] == "OPTION" and positions[i]["instrument"]["underlyingSymbol"] == symbol:
+            quantity = positions[i]["longQuantity"]
+            symbol = positions[i]["instrument"]["symbol"]
+            orders.append([symbol, quantity])
     return orders
 
 def check_exist(payload):
@@ -129,6 +129,20 @@ def check_exist(payload):
     if order["instruction"] != "SELL_TO_CLOSE" and len(get_orders(order["instrument"]["symbol"].split("_")[0])) > 0:
         return True
     return False
+
+def sell(symbol):
+    orders = get_orders(symbol)
+    full_order = get_order_template()
+    full_order["orderLegCollection"][0]["instruction"] = "SELL_TO_CLOSE"
+    full_order["orderType"] = "MARKET"
+    full_order["duration"] = "GOOD_TILL_CANCEL"
+    del full_order["price"]
+    #print("found order!")
+    print(orders)
+    for i in range(len(orders)):
+         full_order["orderLegCollection"][0]["instrument"]["symbol"] = orders[i][0]
+         full_order["orderLegCollection"][0]["quantity"] = orders[i][1]
+    return full_order
 
 # decode contents of message to modify order template
 def parse(message):
@@ -163,13 +177,12 @@ def parse(message):
     full_order["orderLegCollection"][0]["instruction"] = order_type
     full_order["orderLegCollection"][0]["quantity"] = quantity
     full_order["orderLegCollection"][0]["instrument"]["symbol"] = symbol
-
-    #full_order = json.dumps(full_order)
-    #full_order = json.loads(full_order)
     return full_order
 
 def parse_2(message):
     msg = message
+    keywords = ['call', 'calls', 'put', 'puts']
+    sell_keywords = ['rim', 'out', 'lose', 'tak', 'Tak']
     full_order = get_order_template()
     # msg = ["QQQ", "5/24", "337P", "at", "1.70"]
     if msg[0].isupper() or msg[0][1:].isupper():
@@ -182,12 +195,12 @@ def parse_2(message):
         date = d[0].zfill(2) + d[1].zfill(2) + '23'
         option_type = msg[2][-1] + msg[2].rstrip(msg[2][-1])
         symbol = stock + "_" + date + option_type
-        price = ""
-        if "$" in msg[4]:
-            price = (str(float(msg[4][1:]) + 0.03))
-        else:
-            price = (str(float(msg[4]) + 0.03))
-
+        price = price = (str(float(msg[4]) + 0.03))
+        p = 3
+        if "." in msg[4]:
+            p = 4
+        if "$" in msg[p]:
+            price = (str(float(msg[p][1:]) + 0.03))
         quantity = 1
 
         # replace values in json
@@ -197,25 +210,18 @@ def parse_2(message):
         full_order["orderLegCollection"][0]["quantity"] = quantity
         full_order["orderLegCollection"][0]["instrument"]["symbol"] = symbol
         return full_order
-    
-    else: # selling
+    else:
         for m in msg:
-            if "rim" in m or "out" in m or "lose" in m:
+            if [x for x in sell_keywords if(x in m)]:
                 for m2 in msg:
-                    if m2.isupper():
-                        orders = get_orders(m2)
-                        full_order["orderLegCollection"][0]["instruction"] = "SELL_TO_CLOSE"
-                        full_order["orderType"] = "MARKET"
-                        full_order["duration"] = "GOOD_TILL_CANCEL"
-                        del full_order["price"]
-                        #print("found order!")
-                        print(orders)
-                        for i in range(len(orders)):
-                             full_order["orderLegCollection"][0]["instrument"]["symbol"] = orders[i][0]
-                             full_order["orderLegCollection"][0]["quantity"] = orders[i][1]
-                             return full_order
+                    if m2.isupper() and m2.isalpha():
+                        return sell(m2)
+                if any(x in keywords for x in msg):
+                    for i in range(len(msg)):
+                        if any(x in keywords for x in [msg[i]]) and msg[i-1].isalpha() and len(msg[i-1]) > 3 and len(msg[i-1]) < 6:
+                            return sell(msg[i-1].upper())
         return None
-
+    
 def send_payload(payload):
     endpoint, header = get_order_headers()
 
@@ -234,35 +240,23 @@ def send_payload(payload):
     return None
     
 while(True):
-    # define the payload in json format
-    try:
-        message = retrieve_messages(discord_token, channel)
-        if last_message == message:
-            print("message previously read!")
-        else:
-            payload = parse(message)
-            if check_exist(payload):
-                print("order exists in account!") 
+    check_auth()
+    func = [parse, parse_2]
+    for i in range(len(channel_list)):
+        try:
+            message = retrieve_messages(discord_token_list[i], channel_list[i])
+            if last_message_list[i] == message:
+                print(f'message previously read! ({i+1})')
             else:
-                print("sending payload")
-                last_message = message
-                send_payload(payload)
-    except:
-        print("Invalid request.")
+                payload = func[i](message)
+                if check_exist(payload):
+                    print(f'order exists in account! ({i+1})') 
+                else:
+                    print(f'sending payload ({i+1})')
+                    last_message_list[i] = message
+                    send_payload(payload)
+        except:
+            print(f'Invalid request. ({i+1})')
 
-    try:
-        message_2 = retrieve_messages(discord_token_2, channel_2)
-        if last_message_2 == message_2:
-            print("message previously read! (2)")
-        else:
-            payload_2 = parse_2(message_2)
-            if check_exist(payload_2):
-                print("order exists in account! (2)")
-            else:
-                print("sending payload (2)")
-                last_message_2 = message_2
-                send_payload(payload_2)
-    except:
-        print("Invalid request. (2)")
     print("==[" + datetime.now().strftime("%m/%d %H:%M:%S") + "]==")
     time.sleep(delay)
